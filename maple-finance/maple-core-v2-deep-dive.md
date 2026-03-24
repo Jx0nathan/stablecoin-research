@@ -526,6 +526,36 @@ function accruedInterest() public view returns (uint256 accruedInterest_) {
 
 ## 4. 流程一：LP 存款
 
+```mermaid
+sequenceDiagram
+    participant LP as LP（流动性提供者）
+    participant Pool as Pool（ERC-4626）
+    participant PM as PoolManager
+    participant Globals as MapleGlobals
+
+    LP->>Pool: deposit(assets, receiver)
+    Pool->>Globals: 检查 Pool 是否激活（!poolPermissionManager.hasPermission）
+    Pool->>PM: 检查流动性上限（liquidityCap）
+    Pool->>Pool: 计算铸造 shares 数量
+    Note right of Pool: shares = assets × totalSupply / totalAssets
+    Pool->>LP: 铸造 LP 代币（shares）
+    Pool->>LP: 转出 USDC 到 Pool 合约
+```
+
+**核心计算：**
+```
+首次存款（Pool 刚创建）：
+  shares = assets（1:1，初始汇率 = 1）
+
+有贷款收益后：
+  totalAssets = 200 USDC（100本金 + 10利息 + 90现金）
+  totalSupply  = 100 shares（原始 LP 代币）
+  exchangeRate = 200/100 = 2
+  
+  新 LP 存 100 USDC → 铸造 100/2 = 50 shares
+  未来赎回：50 shares × 新汇率 = 赎回金额
+```
+
 ### 完整调用链
 
 ```
