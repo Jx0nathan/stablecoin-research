@@ -7,6 +7,7 @@
 
 ## 目录
 
+0. [从零开始：如何学习这份代码](#0-从零开始如何学习这份代码)
 1. [整体架构图](#1-整体架构图)
 2. [核心合约职责](#2-核心合约职责)
 3. [角色系统](#3-角色系统)
@@ -18,6 +19,297 @@
 9. [关键设计模式深挖](#9-关键设计模式深挖)
 10. [Maple V2 vs Aave V3 深度对比](#10-maple-v2-vs-aave-v3-深度对比)
 11. [初学者常见疑问](#11-初学者常见疑问)
+
+---
+
+## 0. 从零开始：如何学习这份代码
+
+> 如果你是第一次接触 DeFi 合约代码，按这个路径走。跳过任何一步都会让你卡住。
+
+---
+
+### 0.1 你需要的前置知识（诚实评估）
+
+在读 Maple 代码之前，你必须掌握以下内容。每项旁边标了「最低学习时间」：
+
+| 知识点 | 必要程度 | 最低时间 | 推荐资源 |
+|--------|---------|---------|---------|
+| Solidity 基础语法 | ⭐⭐⭐⭐⭐ 必须 | 2天 | [Solidity by Example](https://solidity-by-example.org/) |
+| ERC-20 标准 | ⭐⭐⭐⭐⭐ 必须 | 0.5天 | OpenZeppelin ERC20.sol 源码 |
+| ERC-4626 标准 | ⭐⭐⭐⭐⭐ 必须 | 1天 | [EIP-4626 原文](https://eips.ethereum.org/EIPS/eip-4626) |
+| modifier / event / interface | ⭐⭐⭐⭐ 必须 | 0.5天 | Solidity 文档 |
+| delegatecall / proxy 模式 | ⭐⭐⭐ 建议 | 1天 | [OpenZeppelin Proxy](https://docs.openzeppelin.com/contracts/4.x/api/proxy) |
+| DeFi 基础概念（AMM、借贷） | ⭐⭐⭐ 建议 | 1天 | Uniswap V2 / Aave 文档 |
+
+**自我检测**：如果你能回答以下问题，说明前置知识足够：
+1. ERC-20 的 `transferFrom` 为什么需要 `approve`？
+2. `modifier` 是什么，它和普通函数有什么区别？
+3. ERC-4626 的 `deposit` 和 `mint` 有什么区别？
+4. `delegatecall` 执行时，存储在哪个合约里？
+
+---
+
+### 0.2 环境搭建（30分钟完成）
+
+**第一步：安装工具**
+
+```bash
+# 1. 安装 Foundry（Solidity 开发框架，比 Hardhat 更快）
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
+
+# 验证安装
+forge --version   # forge 0.2.x
+cast --version
+anvil --version
+
+# 2. 安装 Node.js（用于一些辅助脚本）
+# 推荐 v18+，用 nvm 管理
+
+# 3. 安装 VS Code + 插件
+# - Solidity (Juan Blanco) — 语法高亮 + 跳转
+# - Solidity Visual Developer — 调用图可视化
+# - GitLens — 查看代码历史
+```
+
+**第二步：克隆 Maple 源码**
+
+```bash
+# 创建学习目录
+mkdir ~/maple-study && cd ~/maple-study
+
+# 克隆核心仓库（按阅读顺序）
+git clone https://github.com/maple-labs/pool-v2
+git clone https://github.com/maple-labs/fixed-term-loan-manager
+git clone https://github.com/maple-labs/maple-proxy-factory
+
+# 进入 pool-v2，安装依赖
+cd pool-v2
+forge install   # 安装所有 git submodule 依赖
+
+# 验证能编译
+forge build
+# 应该看到：Compiler run successful
+```
+
+**第三步：配置 VS Code 跳转**
+
+```json
+// .vscode/settings.json
+{
+  "solidity.packageDefaultDependenciesContractsDirectory": "contracts",
+  "solidity.remappings": [
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "erc20/=modules/erc20/contracts/",
+    "erc20-helper/=modules/erc20-helper/src/"
+  ]
+}
+```
+
+---
+
+### 0.3 读代码的正确姿势
+
+**原则：自顶向下，问题驱动**
+
+❌ 错误方式：从第一行开始逐行读
+✅ 正确方式：带着问题，跟着资金走
+
+**每次读一个文件，问自己三个问题：**
+1. 这个合约存储了什么？（看 storage 变量）
+2. 谁可以调用这个函数？（看 modifier）
+3. 调用后状态如何变化？（看函数体末尾的状态更新）
+
+**标注技巧（在 VS Code 里）：**
+```
+// 👤 调用者：LP
+// 📥 输入：assets（USDC数量）
+// 📤 输出：shares（凭证数量）
+// 🔒 权限：checkCall("P:deposit")
+// 💾 状态变化：totalSupply ↑, Pool.balanceOf[USDC] ↑
+```
+
+---
+
+### 0.4 分阶段学习计划（建议 10 天）
+
+```
+Day 1-2：Solidity 基础 + ERC-20
+  ├── 读 Solidity by Example 前 10 个例子
+  ├── 读 OpenZeppelin ERC20.sol（约 200 行，全部理解）
+  └── 练习：自己写一个简单的 ERC-20 token
+
+Day 3：ERC-4626 标准
+  ├── 读 EIP-4626 原文（重点：deposit/mint/withdraw/redeem 的区别）
+  ├── 读 OpenZeppelin ERC4626.sol（约 300 行）
+  └── 练习：用 Foundry 写一个最简单的 Vault
+
+Day 4：读 MaplePool.sol（第一个 Maple 合约）
+  ├── 对照本文档 §4（LP 存款流程）逐行理解
+  ├── 重点：checkCall modifier、_mint 内部函数
+  └── 练习：在 Foundry 中 fork mainnet，调用 Pool.deposit()
+
+Day 5：读 MaplePoolManager.sol
+  ├── 重点：canCall、requestFunds、_handleCover
+  ├── 对照本文档 §2.2
+  └── 画出自己的 PoolManager 状态变量图
+
+Day 6：读 LoanManager.sol（最复杂，多花时间）
+  ├── 先理解 issuanceRate 懒惰计算概念（本文档 §9.4）
+  ├── 重点：fund()、claim()、_advanceGlobalPaymentAccounting()
+  └── 画出时间轴，模拟 3 笔贷款的利息计算
+
+Day 7：读 WithdrawalManager.sol
+  ├── 重点：addShares()、processRedemptions()、FIFO 队列
+  ├── 对照本文档 §8
+  └── 用纸笔模拟 5 个赎回请求的处理过程
+
+Day 8：端到端流程串联
+  ├── 用 Foundry fork test，模拟完整流程：
+  │   存款 → 发放贷款 → 还款 → 赎回
+  └── 确认 totalAssets 在每一步的变化符合预期
+
+Day 9：违约场景
+  ├── 模拟违约流程：triggerDefault → Cover 赔付
+  └── 观察 unrealizedLosses 和 sharePrice 的变化
+
+Day 10：融会贯通
+  ├── 读 Maple 官方测试文件（tests/ 目录）
+  ├── 找一个 Maple 的链上交易，用 Tenderly 回放
+  └── 试着改一个参数，预测结果，验证假设
+```
+
+---
+
+### 0.5 第一个动手练习：Fork 测试
+
+这是最快让你「感受」代码的方法：
+
+```solidity
+// test/ForkTest.t.sol
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "forge-std/Test.sol";
+
+// Maple Pool 接口（简化版）
+interface IPool {
+    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
+    function totalAssets() external view returns (uint256);
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address) external view returns (uint256);
+    function convertToAssets(uint256 shares) external view returns (uint256);
+}
+
+interface IERC20 {
+    function approve(address spender, uint256 amount) external returns (bool);
+    function balanceOf(address) external view returns (uint256);
+}
+
+contract MapleDepositTest is Test {
+    // Maple USDC Cash Management Pool（以太坊主网）
+    address constant MAPLE_POOL   = 0xfe119e9C24ab79F1bDd5514D0A9d9a17914C3526;
+    address constant USDC         = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+
+    IPool  pool  = IPool(MAPLE_POOL);
+    IERC20 usdc  = IERC20(USDC);
+
+    function setUp() public {
+        // Fork 以太坊主网（需要 RPC URL）
+        vm.createSelectFork(vm.envString("ETH_RPC_URL"));
+    }
+
+    function test_DepositAndCheckShares() public {
+        // 模拟一个有 100,000 USDC 的用户
+        address user = makeAddr("user");
+        deal(USDC, user, 100_000e6);  // 给用户 100k USDC
+
+        // 记录存款前状态
+        uint256 totalAssetsBefore = pool.totalAssets();
+        uint256 totalSupplyBefore = pool.totalSupply();
+        uint256 sharePriceBefore  = pool.convertToAssets(1e6); // 1 share 的价值
+
+        console.log("=== Before Deposit ===");
+        console.log("Total Assets:  ", totalAssetsBefore / 1e6, "USDC");
+        console.log("Total Supply:  ", totalSupplyBefore / 1e6, "shares");
+        console.log("Share Price:   ", sharePriceBefore,         "units");
+
+        // 执行存款
+        vm.startPrank(user);
+        usdc.approve(MAPLE_POOL, 100_000e6);
+        uint256 sharesReceived = pool.deposit(100_000e6, user);
+        vm.stopPrank();
+
+        // 验证结果
+        console.log("=== After Deposit ===");
+        console.log("Shares Received: ", sharesReceived / 1e6);
+        console.log("User Balance:    ", pool.balanceOf(user) / 1e6);
+        console.log("Total Assets:    ", pool.totalAssets() / 1e6, "USDC");
+
+        // 断言
+        assertEq(pool.balanceOf(user), sharesReceived);
+        assertGt(sharesReceived, 0);
+    }
+}
+```
+
+**运行方式**：
+```bash
+# 需要以太坊 RPC（Infura/Alchemy 免费账号）
+export ETH_RPC_URL="https://mainnet.infura.io/v3/YOUR_KEY"
+
+forge test --match-test test_DepositAndCheckShares -vvvv
+```
+
+---
+
+### 0.6 遇到看不懂的代码怎么办
+
+**方法论（按顺序尝试）**：
+
+```
+1. 看函数名 + 注释
+   → Maple 命名规范很好，函数名基本说清了意图
+
+2. 看 require 语句
+   → require 告诉你「什么情况下会失败」，反推「正常情况是什么」
+   → require(principal_ != 0, "LM:F:LOAN_INACTIVE")
+      → 说明 principal == 0 代表贷款已失效
+
+3. 看测试文件
+   → tests/ 目录下的测试是最好的「使用说明书」
+   → 找到对应函数的测试，看它怎么 setup，怎么调用，怎么 assert
+
+4. 用 cast 查链上状态
+   → cast call <合约地址> "totalAssets()(uint256)" --rpc-url $ETH_RPC_URL
+
+5. 用 Tenderly 回放真实交易
+   → https://tenderly.co/，输入 tx hash，逐步查看状态变化
+
+6. 问 AI（本文档就是这个用途）
+   → 贴上代码片段，描述你的疑问
+```
+
+---
+
+### 0.7 关键术语速查表
+
+| 术语 | 含义 | 在哪出现 |
+|------|------|---------|
+| `shares` | LP 持仓凭证，价格随利息上涨 | Pool.sol |
+| `assets` | 底层资产（USDC） | Pool.sol |
+| `issuanceRate` | 每秒净利息速率（×1e30精度） | LoanManager |
+| `accountedInterest` | 已结算的利息存量 | LoanManager |
+| `domainStart` | 上次会计更新时间 | LoanManager |
+| `domainEnd` | 最近到期贷款时间 | LoanManager |
+| `unrealizedLosses` | 已触发违约但未清算完的损失 | LoanManager |
+| `principalOut` | 当前出借中的本金总量 | LoanManager |
+| `Pool Delegate` | 信用经理，负责贷款审批和违约处理 | PoolManager |
+| `Cover` | Delegate 质押的风险缓冲金 | PoolDelegateCover |
+| `HUNDRED_PERCENT` | 1e6（费率的 100% 基准） | 多处 |
+| `PRECISION` | 1e30（利率计算精度倍数） | LoanManager |
+| `functionId` | 函数标识符，如 "P:deposit" | PoolManager.canCall |
+| `escrowShares` | 进入赎回队列、被托管的 shares | WithdrawalManager |
 
 ---
 
