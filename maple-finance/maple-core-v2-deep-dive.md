@@ -593,19 +593,121 @@ function _mint(uint256 shares_, uint256 assets_, address receiver_, address call
 
 ### shares 价格计算详解
 
+#### 公式本质：你占池子的比例
+
 ```
-场景：Pool 当前状态
-  totalAssets = 1,050,000 USDC（100万本金 + 5万利息累积）
+shares = assets × totalSupply / totalAssets
+```
+
+这个公式乍看是数学运算，其实表达的是一个很直觉的事情：
+
+```
+你的份额数       你存的钱
+──────────  =  ──────────
+池子总份额      池子总资产
+```
+
+**shares 不是"凭证"，而是"所有权比例"。**
+
+你持有 10,000 shares（占总份额 1%），意味着你永远拥有这个池子的 1%。
+不管池子将来涨到多少，赎回时你都能取走那时候的 1%。
+
+---
+
+#### 为什么同样存 10,500 USDC，拿到的是 10,000 shares 而不是 10,500？
+
+因为这个池子已经运行过一段时间，利息让每个 share 升值了：
+
+```
+池子初始状态（刚部署）：
+  totalAssets = 1,000,000 USDC
   totalSupply = 1,000,000 shares
+  sharePrice  = 1.00 USDC/share   ← 1:1
 
-新用户存入 10,500 USDC：
-  shares = assets * totalSupply / totalAssets
-         = 10,500 * 1,000,000 / 1,050,000
-         = 10,000 shares
-
-此时 sharePrice = 1,050,000 / 1,000,000 = 1.05 USDC/share
-用户存 10,500 USDC，拿到 10,000 shares（每 share 值 1.05 USDC）
+运行一段时间后（利息进来了）：
+  totalAssets = 1,050,000 USDC    ← 多了 5 万利息
+  totalSupply = 1,000,000 shares  ← 没人进出，份额没变
+  sharePrice  = 1.05 USDC/share   ← 每份升值了
 ```
+
+**类比基金净值**：
+> 基金净值从 1.00 涨到了 1.05
+> 你用 10,500 元买这个基金
+> 能买到的份额 = 10,500 / 1.05 = **10,000 份**（不是 10,500 份）
+
+晚入场的人，享受不到之前那 5 万利息，所以同样的钱买到的份额更少。这很公平。
+
+---
+
+#### 完整推导过程
+
+```
+已知：
+  totalAssets = 1,050,000 USDC
+  totalSupply = 1,000,000 shares
+  你存入 = 10,500 USDC
+
+Step 1：计算你占池子的比例
+  你的占比 = 10,500 / 1,050,000 = 1%
+
+Step 2：按比例分配份额
+  你的 shares = 1,000,000 × 1% = 10,000 shares
+
+Step 3：验证
+  sharePrice = totalAssets / totalSupply
+             = 1,050,000 / 1,000,000
+             = 1.05 USDC/share
+
+  你拿到 10,000 shares × 1.05 = 10,500 USDC ✅（和你存入的一样，公平）
+```
+
+---
+
+#### 公式变形：三种等价写法
+
+```
+写法 1（标准）：
+  shares = assets × totalSupply / totalAssets
+
+写法 2（用 sharePrice）：
+  shares = assets / sharePrice
+  sharePrice = totalAssets / totalSupply
+
+写法 3（理解本质）：
+  你的份额比 = 你存的钱 / 池子总资产
+  你的 shares = 你的份额比 × 池子总份额
+```
+
+三种写法数学上完全等价，Solidity 里用写法 1（避免小数）。
+
+---
+
+#### 利息如何让 sharePrice 上涨
+
+```
+时间轴：
+
+T0（初始）：
+  totalAssets = 1,000,000   sharePrice = 1.000
+  totalSupply = 1,000,000
+
+T1（1个月后，利息进来 5,000 USDC）：
+  totalAssets = 1,005,000   sharePrice = 1.005  ← 涨了
+  totalSupply = 1,000,000   （没有新存款，份额不变）
+
+T2（3个月后，又进来 15,000 USDC 利息）：
+  totalAssets = 1,020,000   sharePrice = 1.020  ← 继续涨
+  totalSupply = 1,000,000
+
+T3（6个月后，发生 10,000 USDC 违约损失）：
+  totalAssets = 1,010,000   sharePrice = 1.010  ← 回落
+  totalSupply = 1,000,000
+```
+
+**关键理解**：
+- `totalSupply` 只在 mint/burn 时变化（存款/赎回）
+- `totalAssets` 每秒都在因利息变化
+- `sharePrice = totalAssets / totalSupply`，随时间自然上涨
 
 ### checkCall 权限门控详解
 
