@@ -33,6 +33,8 @@ PricerWithOracle.sol（继承 Pricer）
   └── 每次 addPrice 同步更新 RWAOracle（Chainlink 兼容格式）
 ```
 
+![alt text](./image/ondo-usdy-architeture.png)
+
 ---
 
 ## 核心设计：PriceId 快照系统
@@ -47,7 +49,7 @@ PricerWithOracle.sol（继承 Pricer）
 
 ```
 Step 1 — 用户 requestSubscription(amount)
-  → USDC 直转 Coinbase 存款地址（合约零余额！）
+  → USDC 直转 Coinbase 存款地址
   → 生成 depositId，priceId = 0（待绑定）
 
 Step 2 — Operator addPrice(nav, timestamp)
@@ -159,18 +161,6 @@ DeFi 协议（Pendle / Morpho / Curve）读取 NAV 价格
 
 Ondo 的 oracle 不是被 Chainlink 喂价，而是自己写入 Chainlink 兼容格式，对外广播。
 
----
-
-## 对比：Ondo vs 自建 rwa-protocol
-
-| 维度 | Ondo | 自建 rwa-protocol |
-|------|------|-------------------|
-| 资金模型 | 合约零余额，直转 Coinbase | USDC 锁在合约（攻击面大） |
-| 定价模型 | PriceId 快照，绑定后不可改 | fulfill 时读实时 NAV |
-| T+1 强制 | claimableTimestamp 链上约束 | 依赖 operator 操作顺序 |
-| 制裁名单 | Chainalysis 实时自动同步 | operator 手动 sanctionAddress() |
-| KYC 合规 | Allowlist 独立可升级合约 | KYCAllowlist 不可升级 |
-| Oracle 广播 | RWAOracle → Chainlink 格式 → DeFi | 无 DeFi 集成接口 |
 
 ---
 

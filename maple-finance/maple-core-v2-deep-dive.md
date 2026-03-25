@@ -48,97 +48,13 @@
 3. ERC-4626 的 `deposit` 和 `mint` 有什么区别？
 4. `delegatecall` 执行时，存储在哪个合约里？
 
----
-
-### 0.2 环境搭建（30分钟完成）
-
-**第一步：安装工具**
-
-```bash
-# 1. 安装 Foundry（Solidity 开发框架，比 Hardhat 更快）
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-
-# 验证安装
-forge --version   # forge 0.2.x
-cast --version
-anvil --version
-
-# 2. 安装 Node.js（用于一些辅助脚本）
-# 推荐 v18+，用 nvm 管理
-
-# 3. 安装 VS Code + 插件
-# - Solidity (Juan Blanco) — 语法高亮 + 跳转
-# - Solidity Visual Developer — 调用图可视化
-# - GitLens — 查看代码历史
-```
-
-**第二步：克隆 Maple 源码**
-
-```bash
-# 创建学习目录
-mkdir ~/maple-study && cd ~/maple-study
-
-# 克隆核心仓库（按阅读顺序）
-git clone https://github.com/maple-labs/pool-v2
-git clone https://github.com/maple-labs/fixed-term-loan-manager
-git clone https://github.com/maple-labs/maple-proxy-factory
-
-# 进入 pool-v2，安装依赖
-cd pool-v2
-forge install   # 安装所有 git submodule 依赖
-
-# 验证能编译
-forge build
-# 应该看到：Compiler run successful
-```
-
-**第三步：配置 VS Code 跳转**
-
-```json
-// .vscode/settings.json
-{
-  "solidity.packageDefaultDependenciesContractsDirectory": "contracts",
-  "solidity.remappings": [
-    "@openzeppelin/=lib/openzeppelin-contracts/",
-    "erc20/=modules/erc20/contracts/",
-    "erc20-helper/=modules/erc20-helper/src/"
-  ]
-}
-```
-
----
-
-### 0.3 读代码的正确姿势
-
-**原则：自顶向下，问题驱动**
-
-❌ 错误方式：从第一行开始逐行读
-✅ 正确方式：带着问题，跟着资金走
-
-**每次读一个文件，问自己三个问题：**
-1. 这个合约存储了什么？（看 storage 变量）
-2. 谁可以调用这个函数？（看 modifier）
-3. 调用后状态如何变化？（看函数体末尾的状态更新）
-
-**标注技巧（在 VS Code 里）：**
-```
-// 👤 调用者：LP
-// 📥 输入：assets（USDC数量）
-// 📤 输出：shares（凭证数量）
-// 🔒 权限：checkCall("P:deposit")
-// 💾 状态变化：totalSupply ↑, Pool.balanceOf[USDC] ↑
-```
 
 ---
 
 ### 0.4 分阶段学习计划（建议 10 天）
 
 ```
-Day 1-2：Solidity 基础 + ERC-20
-  ├── 读 Solidity by Example 前 10 个例子
-  ├── 读 OpenZeppelin ERC20.sol（约 200 行，全部理解）
-  └── 练习：自己写一个简单的 ERC-20 token
+
 
 Day 3：ERC-4626 标准
   ├── 读 EIP-4626 原文（重点：deposit/mint/withdraw/redeem 的区别）
@@ -180,87 +96,6 @@ Day 10：融会贯通
   └── 试着改一个参数，预测结果，验证假设
 ```
 
----
-
-### 0.5 第一个动手练习：Fork 测试
-
-这是最快让你「感受」代码的方法：
-
-```solidity
-// test/ForkTest.t.sol
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-import "forge-std/Test.sol";
-
-// Maple Pool 接口（简化版）
-interface IPool {
-    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
-    function totalAssets() external view returns (uint256);
-    function totalSupply() external view returns (uint256);
-    function balanceOf(address) external view returns (uint256);
-    function convertToAssets(uint256 shares) external view returns (uint256);
-}
-
-interface IERC20 {
-    function approve(address spender, uint256 amount) external returns (bool);
-    function balanceOf(address) external view returns (uint256);
-}
-
-contract MapleDepositTest is Test {
-    // Maple USDC Cash Management Pool（以太坊主网）
-    address constant MAPLE_POOL   = 0xfe119e9C24ab79F1bDd5514D0A9d9a17914C3526;
-    address constant USDC         = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-
-    IPool  pool  = IPool(MAPLE_POOL);
-    IERC20 usdc  = IERC20(USDC);
-
-    function setUp() public {
-        // Fork 以太坊主网（需要 RPC URL）
-        vm.createSelectFork(vm.envString("ETH_RPC_URL"));
-    }
-
-    function test_DepositAndCheckShares() public {
-        // 模拟一个有 100,000 USDC 的用户
-        address user = makeAddr("user");
-        deal(USDC, user, 100_000e6);  // 给用户 100k USDC
-
-        // 记录存款前状态
-        uint256 totalAssetsBefore = pool.totalAssets();
-        uint256 totalSupplyBefore = pool.totalSupply();
-        uint256 sharePriceBefore  = pool.convertToAssets(1e6); // 1 share 的价值
-
-        console.log("=== Before Deposit ===");
-        console.log("Total Assets:  ", totalAssetsBefore / 1e6, "USDC");
-        console.log("Total Supply:  ", totalSupplyBefore / 1e6, "shares");
-        console.log("Share Price:   ", sharePriceBefore,         "units");
-
-        // 执行存款
-        vm.startPrank(user);
-        usdc.approve(MAPLE_POOL, 100_000e6);
-        uint256 sharesReceived = pool.deposit(100_000e6, user);
-        vm.stopPrank();
-
-        // 验证结果
-        console.log("=== After Deposit ===");
-        console.log("Shares Received: ", sharesReceived / 1e6);
-        console.log("User Balance:    ", pool.balanceOf(user) / 1e6);
-        console.log("Total Assets:    ", pool.totalAssets() / 1e6, "USDC");
-
-        // 断言
-        assertEq(pool.balanceOf(user), sharesReceived);
-        assertGt(sharesReceived, 0);
-    }
-}
-```
-
-**运行方式**：
-```bash
-# 需要以太坊 RPC（Infura/Alchemy 免费账号）
-export ETH_RPC_URL="https://mainnet.infura.io/v3/YOUR_KEY"
-
-forge test --match-test test_DepositAndCheckShares -vvvv
-```
 
 ---
 
@@ -287,8 +122,6 @@ forge test --match-test test_DepositAndCheckShares -vvvv
 5. 用 Tenderly 回放真实交易
    → https://tenderly.co/，输入 tx hash，逐步查看状态变化
 
-6. 问 AI（本文档就是这个用途）
-   → 贴上代码片段，描述你的疑问
 ```
 
 ---

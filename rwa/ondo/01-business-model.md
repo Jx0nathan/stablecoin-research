@@ -1,8 +1,8 @@
 # Ondo Finance — 商业逻辑
 
-## 一句话总结
+## 概括
 
-**把美国国债的收益率卖给全球加密用户，收的是资产管理费（AUM × 0.15%）。**
+**把美国国债的收益率卖给全球加密用户，收的是资产管理费（AUM × 0.15%）**
 
 ---
 
@@ -34,7 +34,7 @@
 ```
 用户 USDC
   → 换成 USD（Coinbase / Circle）
-  → 通过 Clear Street 买入 SHV ETF
+  → 通过 特定的基金公司 买入 SHV ETF
   → 产生利息（~5% / 年）
   → Ondo 留 0.15%
   → 剩余回流给用户（OUSG 价格上涨 / USDY rebase）
@@ -66,8 +66,3 @@
 3. **DeFi 集成深度** — USDY 接入 Pendle、Morpho、Curve，二级流动性
 
 ---
-
-## 关键数据（2025年）
-- 总 AUM：约 $10 亿+
-- 主要链：Ethereum、Polygon、Solana
-- 审计次数：10+（Code4rena、Spearbit、Cyfrin、Halborn 等）
