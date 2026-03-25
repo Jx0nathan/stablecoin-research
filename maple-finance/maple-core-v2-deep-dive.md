@@ -19,6 +19,7 @@
 9. [关键设计模式深挖](#9-关键设计模式深挖)
 10. [Maple V2 vs Aave V3 深度对比](#10-maple-v2-vs-aave-v3-深度对比)
 11. [初学者常见疑问](#11-初学者常见疑问)
+12. [FixedTermLoanManager vs OpenTermLoanManager 深度对比](#12-fixedtermloanmanager-vs-opentermloanmanager-深度对比)
 
 ---
 
@@ -525,36 +526,6 @@ function accruedInterest() public view returns (uint256 accruedInterest_) {
 ---
 
 ## 4. 流程一：LP 存款
-
-```mermaid
-sequenceDiagram
-    participant LP as LP（流动性提供者）
-    participant Pool as Pool（ERC-4626）
-    participant PM as PoolManager
-    participant Globals as MapleGlobals
-
-    LP->>Pool: deposit(assets, receiver)
-    Pool->>Globals: 检查 Pool 是否激活（!poolPermissionManager.hasPermission）
-    Pool->>PM: 检查流动性上限（liquidityCap）
-    Pool->>Pool: 计算铸造 shares 数量
-    Note right of Pool: shares = assets × totalSupply / totalAssets
-    Pool->>LP: 铸造 LP 代币（shares）
-    Pool->>LP: 转出 USDC 到 Pool 合约
-```
-
-**核心计算：**
-```
-首次存款（Pool 刚创建）：
-  shares = assets（1:1，初始汇率 = 1）
-
-有贷款收益后：
-  totalAssets = 200 USDC（100本金 + 10利息 + 90现金）
-  totalSupply  = 100 shares（原始 LP 代币）
-  exchangeRate = 200/100 = 2
-  
-  新 LP 存 100 USDC → 铸造 100/2 = 50 shares
-  未来赎回：50 shares × 新汇率 = 赎回金额
-```
 
 ### 完整调用链
 
@@ -1591,4 +1562,521 @@ Cover 不能全部一次性清光的原因：
 
 ---
 
-*文档基于真实源码（commit: 2026 Q1），仓库：[maple-labs/pool-v2](https://github.com/maple-labs/pool-v2) / [fixed-term-loan-manager](https://github.com/maple-labs/fixed-term-loan-manager)*
+---
+
+## 12. FixedTermLoanManager vs OpenTermLoanManager 深度对比
+
+> 两种 LoanManager 是 Maple 最核心的差异设计，理解它们的区别是理解整个协议的关键
+
+---
+
+### 12.1 一句话区别
+
+| | FixedTermLoanManager | OpenTermLoanManager |
+|--|--|--|
+| **贷款类型** | 有固定到期日，按期还款 | 无固定到期日，随时可还 |
+| **适合场景** | 对冲基金、结构化借贷 | 做市商、灵活流动性需求 |
+| **会计复杂度** | 高（排序链表 + domainEnd） | 低（每笔独立 Payment 结构） |
+| **利率计算** | issuanceRate 跨多贷款汇总 | 每笔贷款独立 issuanceRate |
+| **违约处理** | 抵押品清算 + Liquidator 合约 | 直接 repossess，无需 Liquidator |
+
+---
+
+### 12.2 存储结构对比（源码层面）
+
+#### FixedTermLoanManager 存储
+
+```solidity
+// 全局聚合的利息状态（所有贷款汇总）
+uint256 public issuanceRate;       // 所有贷款的利率之和（每秒净利息 × 1e30）
+uint112 public accountedInterest;  // 已结算的利息存量
+uint48  public domainStart;        // 上次会计更新时间
+uint48  public domainEnd;          // 最近贷款到期时间（关键！）
+uint128 public principalOut;       // 出借中的本金总量
+uint128 public unrealizedLosses;   // 已触发未清算的损失
+
+// 每笔贷款的 PaymentInfo（有排序链表！）
+mapping(uint256 => PaymentInfo) public payments;   // paymentId → 贷款信息
+mapping(address => uint24) public paymentIdOf;     // loan地址 → paymentId
+uint24 public paymentWithEarliestDueDate;          // 链表头：最早到期的贷款
+
+struct PaymentInfo {
+    uint24  platformManagementFeeRate;
+    uint24  delegateManagementFeeRate;
+    uint48  startDate;
+    uint48  paymentDueDate;      // ← 固定期限特有：明确的到期日
+    uint128 incomingNetInterest; // ← 本期预计净利息
+    uint128 refinanceInterest;
+    uint256 issuanceRate;        // ← 本笔贷款贡献的每秒利率
+}
+```
+
+#### OpenTermLoanManager 存储
+
+```solidity
+// 同样有全局聚合利息状态，但 domainEnd 概念消失了！
+uint256 public issuanceRate;       // 所有贷款汇总利率
+uint112 public accountedInterest;
+uint40  public domainStart;
+uint128 public principalOut;
+uint128 public unrealizedLosses;
+
+// 每笔贷款的 Payment（更简单，无排序链表）
+mapping(address => Payment) public paymentFor;  // loan地址 → Payment（直接映射！）
+
+struct Payment {
+    uint24  platformManagementFeeRate;
+    uint24  delegateManagementFeeRate;
+    uint40  startDate;    // ← 本期开始时间
+    uint168 issuanceRate; // ← 本笔贷款的利率（注意：uint168，更小的类型）
+    // ❌ 没有 paymentDueDate！开放期限不知道什么时候还
+}
+
+// 开放期限特有：软违约（Impairment）机制
+mapping(address => Impairment) public impairmentFor;
+
+struct Impairment {
+    uint40 impairedDate;       // 何时被标记为受损
+    bool   impairedByGovernor; // 是否由 Governor 触发
+}
+```
+
+**关键区别**：FixedTerm 有**排序链表**（按到期日排序的 payments 链表），OpenTerm 只有简单的**直接映射**（paymentFor）。
+
+---
+
+### 12.3 利息计算机制对比
+
+#### FixedTermLoanManager：时间域（Domain）机制
+
+```
+问题：多笔贷款，不同到期日，如何高效计算聚合利息？
+
+解决方案：Domain = 两个相邻到期日之间的时间段
+
+贷款A（到期日 T1）：issuanceRate_A = 100 USDC/秒
+贷款B（到期日 T2）：issuanceRate_B = 200 USDC/秒
+贷款C（到期日 T3）：issuanceRate_C = 300 USDC/秒
+（T1 < T2 < T3）
+
+全局 issuanceRate = 600 USDC/秒
+domainEnd = T1（最近到期）
+
+区间 [T0, T1]：
+  interest = 600 × (T1 - T0)
+  T1 到达时：贷款A到期，issuanceRate 减少100
+  新 domainEnd = T2，新 issuanceRate = 500
+
+区间 [T1, T2]：
+  interest = 500 × (T2 - T1)
+  ... 依此类推
+```
+
+核心函数 `_advanceGlobalPaymentAccounting()`：
+
+```solidity
+function _advanceGlobalPaymentAccounting() internal {
+    uint256 domainEnd_ = domainEnd;
+
+    // 如果当前时间超过了 domainEnd（有贷款已到期但未处理）
+    if (domainEnd_ != 0 && block.timestamp > domainEnd_) {
+        uint256 paymentId_ = paymentWithEarliestDueDate; // 从链表头开始
+
+        while (block.timestamp > domainEnd_) {
+            uint256 next_ = sortedPayments[paymentId_].next;
+
+            // 1. 把 [domainStart, domainEnd] 这段时间的利息全部结算
+            // 2. 从链表移除这个到期的 payment
+            // 3. 全局 issuanceRate 减少这笔贷款的利率
+            (uint256 accountedInterestIncrease_, uint256 issuanceRateReduction_) =
+                _accountToEndOfPayment(paymentId_, issuanceRate_, domainStart_, domainEnd_);
+
+            accountedInterest_ += accountedInterestIncrease_;
+            issuanceRate_      -= issuanceRateReduction_;
+
+            domainStart_ = domainEnd_;
+            domainEnd_ = paymentWithEarliestDueDate == 0
+                ? block.timestamp
+                : payments[paymentWithEarliestDueDate].paymentDueDate;
+
+            if ((paymentId_ = next_) == 0) break;
+        }
+    }
+
+    // 把 [domainStart, now] 的利息也结算进来
+    accountedInterest += accountedInterest_ + accruedInterest();
+    domainStart        = block.timestamp;
+}
+```
+
+**为什么需要排序链表？**
+因为需要按到期日顺序处理，必须知道哪个贷款最先到期。链表比遍历所有贷款效率高得多。
+
+---
+
+#### OpenTermLoanManager：简单累加机制
+
+```
+开放期限没有固定到期日，不需要 domainEnd 的概念。
+
+_updateInterestAccounting() 函数（简单得多）：
+
+accountedInterest = accountedInterest + accruedInterest() + adjustment
+domainStart = block.timestamp
+issuanceRate = issuanceRate + rateAdjustment
+```
+
+```solidity
+function _updateInterestAccounting(int256 accountedInterestAdjustment_, int256 issuanceRateAdjustment_) internal {
+    // 关键：先把从 domainStart 到现在的利息固化到 accountedInterest
+    // 然后直接更新 issuanceRate（加上或减去某笔贷款的利率）
+    accountedInterest = _uint112(_max(
+        _int256(accountedInterest + accruedInterest()) + accountedInterestAdjustment_,
+        0
+    ));
+    domainStart  = _uint40(block.timestamp);
+    issuanceRate = _uint256(_max(_int256(issuanceRate) + issuanceRateAdjustment_, 0));
+}
+```
+
+**更简单的原因**：开放期限贷款没有"预定到期日"，每次交互（还款、impair、违约）都是明确的时间点，直接更新即可，不需要回溯历史区间。
+
+---
+
+### 12.4 fund() 流程对比
+
+#### FixedTermLoanManager.fund()
+
+```
+Delegate 调用 fund(loanAddress)
+    │
+    ├─1─► 四重验证
+    │       ├─ 工厂在白名单 ("FT_LOAN_FACTORY")
+    │       ├─ loan 由白名单工厂创建
+    │       ├─ 借款人在白名单
+    │       └─ paymentsRemaining != 0
+    │
+    ├─2─► _advanceGlobalPaymentAccounting()  ← 先把历史账算清
+    │
+    ├─3─► Pool → Loan 转账（通过 requestFunds）
+    │
+    ├─4─► loan.fundLoan()  ← Loan 确认收款，记录开始时间
+    │
+    ├─5─► principalOut += principal
+    │
+    └─6─► _updateIssuanceParams(
+               issuanceRate + _queueNextPayment(loan, now, dueDate),
+               accountedInterest
+          )
+          → 新贷款的利率加入全局 issuanceRate
+          → 把这笔 payment 插入排序链表（按 dueDate 排序）
+          → 如果 dueDate < 当前 domainEnd，更新 domainEnd
+```
+
+#### OpenTermLoanManager.fund()
+
+```
+Delegate 调用 fund(loanAddress)
+    │
+    ├─1─► 三重验证（少了 paymentsRemaining 检查）
+    │       ├─ 工厂在白名单 ("OT_LOAN_FACTORY")
+    │       ├─ loan 由工厂创建
+    │       └─ 借款人在白名单
+    │
+    ├─2─► principal = loan.principal()（从 Loan 合约读取）
+    │
+    ├─3─► _prepareFundsForLoan(loan, principal)
+    │       ├─ requestFunds 从 Pool 拿钱
+    │       └─ approve Loan 使用这些资金
+    │
+    ├─4─► loan.fund()  ← 注意：返回 fundsLent_
+    │
+    ├─5─► _updatePrincipalOut(+fundsLent_)
+    │
+    └─6─► payment_ = _addPayment(loan_)
+          _updateInterestAccounting(0, +payment_.issuanceRate)
+          → 新贷款的利率直接加入全局
+          → paymentFor[loan] 简单赋值，无需排序链表
+```
+
+**关键差异**：OpenTerm 的 `fund()` 不需要 `_advanceGlobalPaymentAccounting()`，因为没有 domainEnd 需要检查。
+
+---
+
+### 12.5 claim()（还款）流程对比
+
+#### FixedTermLoanManager.claim()
+
+```
+借款人调用 Loan.makePayment() → Loan 调用 LoanManager.claim()
+
+claim(principal_, interest_, prevDueDate_, nextDueDate_)
+    │
+    ├─1─► _advanceGlobalPaymentAccounting()  ← 必须先推进时间轴
+    │
+    ├─2─► _distributeClaimedFunds(loan, principal, interest)
+    │       ├─ Pool Delegate ← delegateManagementFee
+    │       ├─ Treasury ← platformManagementFee
+    │       └─ Pool ← 净利息 + 本金
+    │
+    ├─3─► if principal > 0: principalOut -= principal
+    │
+    ├─4─► previousRate_ = _handlePreviousPaymentAccounting(loan)
+    │       ← 移除旧的 paymentId，从链表删除，返回旧利率
+    │
+    ├─5─► if nextDueDate_ == 0（贷款结束）:
+    │       issuanceRate -= previousRate_
+    │       return
+    │
+    └─6─► newRate_ = _queueNextPayment(loan, min(now, prevDueDate_), nextDueDate_)
+          → 注意：逾期时 startDate 用 prevDueDate_（不用 now）
+          → 新的 payment 插入排序链表
+
+    三种时序处理：
+    A. 按时还款（now <= prevDueDate_）：
+       issuanceRate = issuanceRate + newRate - prevRate
+    B. 逾期还款（prevDueDate_ < now <= nextDueDate_）：
+       issuanceRate += newRate
+       accountedInterest += (now - prevDueDate_) × newRate / PRECISION
+    C. 严重逾期（now > nextDueDate_）：
+       完整记录整个未来期间的利息
+```
+
+#### OpenTermLoanManager.claim()
+
+```
+借款人调用 Loan → LoanManager.claim()
+
+claim(principal_, interest_, delegateServiceFee_, platformServiceFee_, nextPaymentDueDate_)
+    │
+    注意：参数不同！OpenTerm 传入的是：
+      - principal_（int256！可以是负数，表示本金增加）
+      - interest_（本期利息）
+      - delegateServiceFee_（服务费，区别于管理费）
+      - platformServiceFee_
+      - nextPaymentDueDate_（0 = 贷款结束）
+    │
+    ├─1─► 验证：要么有 nextDueDate 且有剩余本金，要么都为0且本金已归还
+    │
+    ├─2─► _accountForLoanImpairmentRemoval(loan, originalPrincipal)
+    │       ← 如果之前被 impaired，先恢复会计
+    │
+    ├─3─► _distributeClaimedFunds(loan, principal, interest, delegateFee, platformFee)
+    │       ← 资金分配（同 FixedTerm，但费用结构有差异）
+    │
+    ├─4─► if principal != 0: _updatePrincipalOut(-principal_)
+    │       ← 注意是 int256，可以减少也可以增加
+    │
+    ├─5─► claimedPayment_ = _removePayment(loan_)
+    │       ← 从 paymentFor 映射删除（比链表简单得多）
+    │
+    ├─6─► 计算 accountedInterestAdjustment（消除已计息但还未确认的部分）
+    │
+    ├─7─► if nextDueDate == 0（贷款结束）:
+    │       _updateInterestAccounting(adjustment, -claimedRate)
+    │       return
+    │
+    └─8─► if principal < 0（本金增加，需要追加放款）:
+          _prepareFundsForLoan(loan, -principal)
+
+          nextPayment_ = _addPayment(loan_)  ← 重新记录新一期
+          _updateInterestAccounting(adjustment, nextRate - claimedRate)
+```
+
+**核心区别**：
+- FixedTerm 的 `claim` 需要先 `_advanceGlobalPaymentAccounting()`（处理历史 domain）
+- OpenTerm 的 `claim` 直接用 `_updateInterestAccounting()`（只处理当前时刻）
+
+---
+
+### 12.6 违约处理对比（最大差异）
+
+#### FixedTermLoanManager 违约（两阶段）
+
+```
+Phase 1：Delegate 调用 triggerDefault(loan, liquidatorFactory)
+    │
+    ├─► impairLoan()（软违约，先 impair）
+    │     ├─ unrealizedLosses += principal + interest
+    │     ├─ issuanceRate -= 本笔利率
+    │     └─ Pool sharePrice 立即下降
+    │
+    ├─► 部署 Liquidator 合约
+    │     └─ 抵押品转移到 Liquidator
+    │
+    └─► emit CollateralLiquidationTriggered（等待拍卖）
+
+Phase 2：Delegate 调用 finishCollateralLiquidation(loan)
+    │
+    ├─► Liquidator 将拍卖所得 USDC 转回
+    │
+    ├─► _distributeLiquidationFunds()
+    │     ├─ Treasury 优先拿 platformFees
+    │     ├─ Pool 拿 toPool（补偿LP损失）
+    │     └─ 剩余退还给 borrower（如果抵押品超额）
+    │
+    ├─► unrealizedLosses 清零
+    └─► 确认实际损失（Pool totalAssets 永久减少）
+```
+
+#### OpenTermLoanManager 违约（单阶段，更直接）
+
+```
+Delegate/PoolManager 调用 triggerDefault(loan)
+    │
+    ├─1─► _accountForLoanImpairment(loan)
+    │       ← 先 impair（如果还没 impaired 的话）
+    │
+    ├─2─► ILoanLike(loan).getPaymentBreakdown(impairedDate)
+    │       ← 计算截止到 impairedDate 的利息明细
+    │
+    ├─3─► recoveredFunds_ = ILoanLike(loan).repossess(address(this))
+    │       ← 直接没收！把 Loan 合约里的资金转到 LoanManager
+    │       ← 注意：OpenTerm 贷款通常有抵押品，这里一次性取走
+    │       ← 没有单独的 Liquidator 合约！
+    │
+    ├─4─► _distributeLiquidationFunds(loan, principal, interest, platformFee, recoveredFunds)
+    │       ├─ Treasury ← platformFees（优先）
+    │       ├─ Pool ← 剩余补损失
+    │       └─ Borrower ← 多余部分退还
+    │
+    ├─5─► _removePayment(loan_)
+    │
+    ├─6─► 更新会计：
+    │       _updateInterestAccounting(-accountedImpairedInterest, 0)
+    │       _updateUnrealizedLosses(-(principal + accountedImpairedInterest))
+    │       _updatePrincipalOut(-principal)
+    │
+    └─7─► delete impairmentFor[loan_]
+
+关键差异：
+  FixedTerm → 两阶段（triggerDefault + finishCollateralLiquidation）
+  OpenTerm  → 单阶段（直接 repossess，liquidationComplete 永远返回 true）
+```
+
+**为什么 OpenTerm 不需要两阶段？**
+
+OpenTerm 贷款的抵押品通常是**链上资产**（USDC/稳定币），可以直接转账；FixedTerm 贷款抵押品可能是**非流动性资产**（BTC、ETH 等），需要通过 Liquidator 合约进行拍卖。
+
+---
+
+### 12.7 Impairment（软违约）机制详解
+
+这是 OpenTermLoanManager 独有的精细化机制：
+
+```
+状态转换图：
+
+正常贷款
+    │
+    ├─► impairLoan() ─────────────────────────────────────────► 受损状态
+    │                                                               │
+    │   效果：                                                      │
+    │   - unrealizedLosses += principal + 已计利息               │
+    │   - issuanceRate -= 本笔利率（停止计息）                    │
+    │   - sharePrice 立即反映潜在损失                              │
+    │                                                               │
+    │   不能做：触发 Loan 合约的 impair()，影响 paymentDueDate    │
+    │                                                               │
+    ├─◄── removeLoanImpairment() ◄──────────────────────────────── │
+    │                                                               │
+    │   效果：恢复正常                                              │
+    │   - unrealizedLosses -= 之前加的那部分                      │
+    │   - issuanceRate += 恢复利率                                 │
+    │   - 补充 impaired 期间的利息                                 │
+    │                                                               │
+    └─────────────────────────────────────────────────────────► triggerDefault()
+                                                                  （真正违约）
+```
+
+```solidity
+// 核心：_accountForLoanImpairment（OpenTerm 版本）
+function _accountForLoanImpairment(address loan_, bool isGovernor_) internal returns (uint40 impairedDate_) {
+    impairedDate_ = impairmentFor[loan_].impairedDate;
+
+    // 如果已经 impaired，直接返回原始 impairedDate（不重复 impair）
+    if (impairedDate_ != 0) return impairedDate_;
+
+    Payment memory payment_ = paymentFor[loan_];
+
+    // 记录 impaired 时间和触发者
+    impairmentFor[loan_] = Impairment(impairedDate_ = _uint40(block.timestamp), isGovernor_);
+
+    // 停止该贷款的利息计算（从全局 issuanceRate 移除）
+    _updateInterestAccounting(0, -_int256(payment_.issuanceRate));
+
+    uint256 principal_ = ILoanLike(loan_).principal();
+
+    // 把本金 + 已计利息标记为"潜在损失"
+    _updateUnrealizedLosses(
+        _int256(principal_ + _getIssuance(payment_.issuanceRate, block.timestamp - payment_.startDate))
+    );
+}
+```
+
+---
+
+### 12.8 PRECISION 精度差异
+
+两个 LoanManager 使用不同的精度常量：
+
+```solidity
+// FixedTermLoanManager
+uint256 public constant PRECISION = 1e30;
+
+// OpenTermLoanManager
+uint256 public constant PRECISION = 1e27;
+```
+
+**为什么不同？**
+
+FixedTerm 的 `issuanceRate` 存在 `uint256`（256位），可以用更高精度 1e30。
+OpenTerm 的 `issuanceRate` 存在 `uint168`（168位，空间更小），用 1e27 防止溢出。
+
+---
+
+### 12.9 callPrincipal：OpenTerm 独有功能
+
+```solidity
+// OpenTermLoanManager 独有
+function callPrincipal(address loan_, uint256 principal_) external onlyPoolDelegate isLoan(loan_) {
+    ILoanLike(loan_).callPrincipal(principal_);
+}
+
+function removeCall(address loan_) external onlyPoolDelegate isLoan(loan_) {
+    ILoanLike(loan_).removeCall();
+}
+```
+
+**什么是 callPrincipal？**
+
+Delegate 可以随时要求借款人在下次还款时归还指定金额的本金。这是开放期限贷款的核心灵活性：Delegate 可以按需调整每期的本金归还量，而不需要等到固定到期日。
+
+---
+
+### 12.10 学习顺序建议
+
+```
+如果你要深入学习两个 LoanManager，建议顺序：
+
+1. 先读 OpenTermLoanManager（更简单）
+   ├─ Storage 结构简单（无排序链表）
+   ├─ _updateInterestAccounting 直观
+   └─ claim() 逻辑清晰，没有复杂的时序分支
+
+2. 再读 FixedTermLoanManager（更复杂）
+   ├─ 理解 domainEnd 机制（关键概念）
+   ├─ 理解排序链表（sortedPayments）
+   └─ _advanceGlobalPaymentAccounting 的循环逻辑
+
+3. 对比两者的 claim() 函数
+   ← 这是理解差异最直接的切入点
+
+代码量参考：
+  OpenTermLoanManager.sol  ≈ 500 行
+  FixedTermLoanManager.sol ≈ 800 行（含排序链表逻辑）
+```
+
+---
+
+*文档基于真实源码（commit: 2026 Q1），仓库：[maple-labs/pool-v2](https://github.com/maple-labs/pool-v2) / [fixed-term-loan-manager](https://github.com/maple-labs/fixed-term-loan-manager) / [open-term-loan-manager](https://github.com/maple-labs/open-term-loan-manager)*
