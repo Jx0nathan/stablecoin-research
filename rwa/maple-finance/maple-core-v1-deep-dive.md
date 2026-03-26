@@ -70,7 +70,7 @@ fundingLocker    = IFundingLockerFactory(_flFactory).newLocker(_liquidityAsset);
 - 攻击面被隔离 — 即便 Loan 合约有 bug，资金在 Locker 里也需要单独的攻击路径
 - 审计更容易 — 每个 Locker 逻辑极简，几十行代码
 
-**可以复用的思路**：在你的 CaaS 卡系统里，不同用途的资金（沉淀资金 / 运营资金 / 准备金）可以用类似思路进行账户隔离，哪怕是链下系统也适用。
+**可以复用的思路**： 不同用途的资金（沉淀资金 / 运营资金 / 准备金）可以用类似思路进行账户隔离，哪怕是链下系统也适用
 
 ---
 
@@ -590,4 +590,3 @@ DebtLocker 是 Pool 对 Loan 持有债权的代理合约：
 > - 源码：https://github.com/maple-labs/maple-core  
 > - 审计报告：PeckShield V1.0 / Code Arena April 2021 / Dedaub  
 > - ERC-2222 标准：https://github.com/ethereum/EIPs/issues/2222  
-> - 上链地址：Etherscan `MapleGlobals` → `0xC234c62c8C09687DFf0d9047e40042cd166F3600`
