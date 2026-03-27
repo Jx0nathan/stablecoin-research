@@ -1,6 +1,5 @@
 # Maple Finance — 调研笔记
 
-> 调研时间：2026-03-02
 > 官网：https://maple.finance
 > 文档：https://docs.maple.finance
 
